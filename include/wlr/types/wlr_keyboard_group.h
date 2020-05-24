@@ -18,6 +18,19 @@ struct wlr_keyboard_group {
 	struct wlr_input_device *input_device;
 	struct wl_list devices; // keyboard_group_device::link
 	struct wl_list keys; // keyboard_group_key::link
+
+	struct {
+		// Emitted when a keyboard gets added to or removed from the group
+		// while a key is pressed that is not pressed by any other keyboard in
+		// the group. Bindings should not trigger for these events. It only
+		// exists to allow the compositor to update its internal state. It is
+		// also necessary to send release events to surfaces that has a
+		// corresponding pressed event sent to avoid key state corruption. If
+		// this is a press event or a press was not sent to the surface, it
+		// should not be sent to the surface.
+		struct wl_signal key_changed;
+	} events;
+
 	void *data;
 };
 

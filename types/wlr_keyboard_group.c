@@ -5,6 +5,8 @@
 #include <time.h>
 #include <wayland-server-core.h>
 #include <xkbcommon/xkbcommon.h>
+#include "types/wlr_keyboard.h"
+#include "util/signal.h"
 #include "wlr/interfaces/wlr_keyboard.h"
 #include "wlr/types/wlr_keyboard.h"
 #include "wlr/types/wlr_keyboard_group.h"
@@ -69,6 +71,7 @@ struct wlr_keyboard_group *wlr_keyboard_group_create(void) {
 	wlr_keyboard_init(&group->keyboard, &impl);
 	wl_list_init(&group->devices);
 	wl_list_init(&group->keys);
+	wl_signal_init(&group->events.key_changed);
 
 	return group;
 }
@@ -81,12 +84,9 @@ struct wlr_keyboard_group *wlr_keyboard_group_from_wlr_keyboard(
 	return (struct wlr_keyboard_group *)keyboard;
 }
 
-static void handle_keyboard_key(struct wl_listener *listener, void *data) {
-	struct keyboard_group_device *group_device =
-		wl_container_of(listener, group_device, key);
+static bool process_key(struct keyboard_group_device *group_device,
+		struct wlr_event_keyboard_key *event) {
 	struct wlr_keyboard_group *group = group_device->keyboard->group;
-	struct wlr_event_keyboard_key *event = data;
-
 	struct keyboard_group_key *key, *tmp;
 	wl_list_for_each_safe(key, tmp, &group->keys, link) {
 		if (key->keycode != event->keycode) {
@@ -94,12 +94,11 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
 		}
 		if (event->state == WLR_KEY_PRESSED) {
 			key->count++;
-			return;
-		}
-		if (event->state == WLR_KEY_RELEASED) {
+			return false;
+		} else if (event->state == WLR_KEY_RELEASED) {
 			key->count--;
 			if (key->count > 0) {
-				return;
+				return false;
 			}
 			wl_list_remove(&key->link);
 			free(key);
@@ -112,14 +111,21 @@ static void handle_keyboard_key(struct wl_listener *listener, void *data) {
 			calloc(1, sizeof(struct keyboard_group_key));
 		if (!key) {
 			wlr_log(WLR_ERROR, "Failed to allocate keyboard_group_key");
-			return;
+			return false;
 		}
 		key->keycode = event->keycode;
 		key->count = 1;
 		wl_list_insert(&group->keys, &key->link);
 	}
+	return true;
+}
 
-	wlr_keyboard_notify_key(&group_device->keyboard->group->keyboard, data);
+static void handle_keyboard_key(struct wl_listener *listener, void *data) {
+	struct keyboard_group_device *group_device =
+		wl_container_of(listener, group_device, key);
+	if (process_key(group_device, data)) {
+		wlr_keyboard_notify_key(&group_device->keyboard->group->keyboard, data);
+	}
 }
 
 static void handle_keyboard_modifiers(struct wl_listener *listener,
@@ -198,7 +204,15 @@ static void refresh_state(struct keyboard_group_device *device,
 			.update_state = true,
 			.state = state
 		};
-		handle_keyboard_key(&device->key, &event);
+		if (process_key(device, &event)) {
+			struct wlr_keyboard_group *group = device->keyboard->group;
+			// Update state
+			keyboard_key_update(&group->keyboard, &event);
+			keyboard_modifier_update(&group->keyboard);
+			keyboard_led_update(&group->keyboard);
+			// Send to compositor
+			wlr_signal_emit_safe(&group->events.key_changed, &event);
+		}
 	}
 }
 
@@ -298,6 +312,7 @@ void wlr_keyboard_group_destroy(struct wlr_keyboard_group *group) {
 	}
 	wlr_keyboard_destroy(&group->keyboard);
 	wl_list_remove(&group->input_device->events.destroy.listener_list);
+	wl_list_remove(&group->events.key_changed.listener_list);
 	free(group->input_device);
 	free(group);
 }
